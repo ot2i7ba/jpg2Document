@@ -5,8 +5,8 @@
 
 """
 jpg2Document.py v0.0.2 - 2025-02-07
-Generate a Word document from a template, inserting a table of compressed,
-landscape-oriented images in place of a given placeholder. If the placeholder
+Generate a Word document from a template by inserting a table of compressed,
+landscape-oriented images in place of a specified placeholder. If the placeholder
 is not found, the script aborts immediately (no images are processed).
 """
 
@@ -32,7 +32,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm
 from docx.table import Table
-from docx.text.paragraph import Paragraph  # Erweiterte Typisierung
+from docx.text.paragraph import Paragraph  # Extended typing
 
 # Default values
 DEFAULT_TEMPLATE = "jpg2Document.docx"            # Default Word template name
@@ -44,8 +44,8 @@ DEFAULT_MAX_IMAGE_WIDTH_PX = 1200                 # Maximum width in pixels befo
 DEFAULT_JPEG_QUALITY = 80                         # JPEG compression quality (0-100)
 DEFAULT_DOC_AUTHOR = "jpg2Document"               # Document property: author
 DEFAULT_DOC_COMMENTS = "jpg2Document by ot2i7ba"  # Document property: comments
-DEFAULT_INPUT_DIR = Path.cwd()                    # Standardmäßig aktuelles Verzeichnis
-DEFAULT_EXTENSIONS = ".jpg,.jpeg,.png"            # Zulässige Bilddateiendungen
+DEFAULT_INPUT_DIR = Path.cwd()                    # Default current directory
+DEFAULT_EXTENSIONS = ".jpg,.jpeg,.png"            # Allowed image file extensions
 
 def clear_console() -> None:
     """Clear the console screen using subprocess.call."""
@@ -58,8 +58,8 @@ def print_blank_line() -> None:
 
 class Spinner:
     """
-    Objektorientierter Spinner zur Anzeige eines Fortschrittssymbols.
-    Mit start() und stop() sowie als Kontextmanager nutzbar.
+    Object-oriented spinner for displaying a progress indicator.
+    Usable with start() and stop(), and as a context manager.
     """
     def __init__(self, task_name: str) -> None:
         self.task_name = task_name
@@ -116,7 +116,7 @@ def compress_and_scale_image(
 ) -> bool:
     """
     Attempt to open 'input_path' as an image, resize it to 'max_width_px'
-    if wider, and save it as a JPEG to 'output_path' with the specified 'quality'.
+    if it is wider, and save it as a JPEG to 'output_path' with the specified quality.
 
     Returns:
         True if the image was successfully opened and saved, False otherwise.
@@ -147,7 +147,7 @@ def insert_table_after_paragraph(
 ) -> Table:
     """
     Create a new table with (rows x cols) cells, then insert it immediately
-    after the given paragraph in the docx 'document'.
+    after the given paragraph in the docx document.
 
     Returns:
         A docx.table.Table object representing the newly inserted table.
@@ -168,8 +168,8 @@ def create_table_with_images(
 ) -> None:
     """
     Build a 3-column table of images (left image, narrow gap, right image),
-    inserting the table immediately after 'paragraph'. Each pair of images is
-    followed by an empty row.
+    inserting the table immediately after the given paragraph. Each pair of images
+    is followed by an empty row.
     """
     total_images = len(image_paths)
     pairs = ceil(total_images / 2)
@@ -189,7 +189,7 @@ def create_table_with_images(
     idx_image = 0
     for pair_idx in range(pairs):
         row_images = table.rows[pair_idx * 2]
-        # Die folgende Zeile bleibt als Trennung leer.
+        # The following row remains empty as a separator.
         _ = table.rows[pair_idx * 2 + 1]
 
         if idx_image < total_images:
@@ -208,9 +208,9 @@ def create_table_with_images(
 
 def get_image_files(input_dir: Path, valid_ext: Tuple[str, ...]) -> List[Path]:
     """
-    Returns a sorted list of image file Paths from the specified directory that match the given extensions.
+    Return a sorted list of image file Paths from the specified directory that match the given extensions.
     """
-    # Durchsuche das Verzeichnis rekursiv (nur Dateien im aktuellen Verzeichnis)
+    # Search the directory (only files in the current directory)
     files = [p for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() in valid_ext]
     return sorted(files, key=lambda p: p.name.lower())
 
@@ -222,8 +222,8 @@ def process_images(
     jpeg_quality: int
 ) -> List[str]:
     """
-    Process all images in the given input_dir that have valid extensions.
-    Compress and scale images into the compressed_dir.
+    Process all images in the given input directory that have valid extensions.
+    Compress and scale images into the compressed directory.
     
     Returns:
         A list of file paths (as strings) of the successfully processed images.
@@ -282,32 +282,32 @@ def validate_parameters(args: argparse.Namespace) -> Tuple[Tuple[str, ...], floa
           - max_image_width_px: int
           - jpeg_quality: int
     """
-    # Validierung von Bildqualität
+    # Validate JPEG quality
     quality = args.jpeg_quality if args.jpeg_quality is not None else DEFAULT_JPEG_QUALITY
     if not (0 <= quality <= 100):
         print("jpeg_quality must be between 0 and 100.")
         sys.exit(1)
     
-    # Validierung der Breitenwerte
+    # Validate width values
     img_width = args.image_width if args.image_width is not None else DEFAULT_IMAGE_WIDTH_CM
     gap_width = args.gap_width if args.gap_width is not None else DEFAULT_GAP_WIDTH_CM
     if img_width <= 0 or gap_width < 0:
         print("image_width must be > 0 and gap_width must be >= 0.")
         sys.exit(1)
     
-    # Validierung der max_px
+    # Validate max_px
     max_px = args.max_px if args.max_px is not None else DEFAULT_MAX_IMAGE_WIDTH_PX
     if max_px <= 0:
         print("max_px must be a positive integer.")
         sys.exit(1)
     
-    # Validierung des Eingabeverzeichnisses
+    # Validate the input directory
     input_path = Path(args.input_dir)
     if not input_path.is_dir():
         print(f"Input directory '{input_path}' does not exist or is not a directory.")
         sys.exit(1)
     
-    # Verarbeitung der Dateiendungen (z.B. ".jpg,.jpeg,.png")
+    # Process file extensions (e.g., ".jpg,.jpeg,.png")
     ext_list = [ext.strip().lower() for ext in args.extensions.split(',') if ext.strip()]
     if not ext_list:
         print("At least one valid file extension must be provided.")
@@ -315,14 +315,14 @@ def validate_parameters(args: argparse.Namespace) -> Tuple[Tuple[str, ...], floa
     
     return (tuple(ext_list), img_width, gap_width, max_px, quality)
 
-class Jpg2Dokument:
+class jpg2Document:
     """
-    Kapselt den gesamten Prozess: 
-      - Einlesen und Validieren der Parameter,
-      - Öffnen des Templates,
-      - Verarbeiten und Komprimieren der Bilder,
-      - Einfügen der Bilder in das Template,
-      - Setzen der Dokumenteigenschaften und Speichern.
+    Encapsulates the entire process:
+      - Reading and validating parameters,
+      - Opening the template,
+      - Processing and compressing images,
+      - Inserting images into the template,
+      - Setting document properties and saving.
     """
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -335,7 +335,7 @@ class Jpg2Dokument:
         self.input_dir = Path(args.input_dir)
 
     def run(self) -> None:
-        # Überprüfe, ob das Template existiert
+        # Check if the template exists
         template_path = Path(self.docx_template)
         if not template_path.exists():
             print(f"Template '{template_path}' was not found. Aborting.")
@@ -347,29 +347,29 @@ class Jpg2Dokument:
             print(f"Failed to open template '{template_path}': {err}")
             sys.exit(1)
 
-        # Prüfe, ob der Platzhalter vorhanden ist.
+        # Check if the placeholder is present.
         if not any(self.placeholder_text in paragraph.text for paragraph in document.paragraphs):
             print(f"Placeholder '{self.placeholder_text}' was not found. Aborting.")
             sys.exit(1)
 
-        # Hole Bilddateien aus dem Eingabeverzeichnis
+        # Retrieve image files from the input directory
         image_files = get_image_files(self.input_dir, self.valid_ext)
         if not image_files:
             print("No image files found in the input directory. Aborting.")
             sys.exit(1)
 
-        # Verwende ein temporäres Verzeichnis zur Ablage der komprimierten Bilder.
+        # Use a temporary directory to store the compressed images.
         with tempfile.TemporaryDirectory() as temp_dir:
             compressed_dir = Path(temp_dir)
             with Spinner("images") as spinner:
                 compressed_paths = process_images(self.input_dir, compressed_dir, self.valid_ext, self.max_image_width_px, self.jpeg_quality)
-            print()  # Zeilenumbruch nach dem Spinner
+            print()  # Line break after the spinner
 
             if not compressed_paths:
                 print("No valid landscape images could be processed. Aborting.")
                 sys.exit(1)
 
-            # Ersetze den Platzhalter im Dokument durch die Tabelle mit Bildern.
+            # Replace the placeholder in the document with the table of images.
             for paragraph in document.paragraphs:
                 if self.placeholder_text in paragraph.text:
                     paragraph.text = paragraph.text.replace(self.placeholder_text, "")
@@ -379,7 +379,7 @@ class Jpg2Dokument:
         print_blank_line()
         print(f"Placeholder '{self.placeholder_text}' found and replaced.")
 
-        # Setze Dokumenteigenschaften.
+        # Set document properties.
         document.core_properties.author = self.doc_author
         document.core_properties.comments = self.doc_comments
 
@@ -395,7 +395,7 @@ class Jpg2Dokument:
 
 def main() -> None:
     args = parse_arguments()
-    app = Jpg2Dokument(args)
+    app = jpg2Document(args)
     app.run()
 
 if __name__ == "__main__":
