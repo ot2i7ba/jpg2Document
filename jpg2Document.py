@@ -43,7 +43,7 @@ DEFAULT_GAP_WIDTH_CM = 0.05                       # Gap in centimeters between i
 DEFAULT_MAX_IMAGE_WIDTH_PX = 1200                 # Maximum width in pixels before scaling images down
 DEFAULT_JPEG_QUALITY = 80                         # JPEG compression quality (0-100)
 DEFAULT_DOC_AUTHOR = "jpg2Document"               # Document property: author
-DEFAULT_DOC_COMMENTS = "jpg2Document by ot2i7ba"   # Document property: comments
+DEFAULT_DOC_COMMENTS = "jpg2Document by ot2i7ba"  # Document property: comments
 DEFAULT_INPUT_DIR = Path.cwd()                    # Standardmäßig aktuelles Verzeichnis
 DEFAULT_EXTENSIONS = ".jpg,.jpeg,.png"            # Zulässige Bilddateiendungen
 
