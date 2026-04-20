@@ -1,408 +1,528 @@
+#!/usr/bin/env python3
 # jpg2Document.py
 # Copyright (c) 2024 ot2i7ba
 # https://github.com/ot2i7ba/
 # This code is licensed under the MIT License (see LICENSE for details).
 
 """
-jpg2Document.py v0.0.2 - 2025-02-07
+jpg2Document.py v0.1.0 - 2026-04-20
 Generate a Word document from a template by inserting a table of compressed,
-landscape-oriented images in place of a specified placeholder. If the placeholder
-is not found, the script aborts immediately (no images are processed).
+landscape-oriented images in place of a specified placeholder.
 """
 
-# Python standard library imports
-import sys
-import itertools
-import time
-import threading
-import subprocess
-import shutil
-import argparse
-import tempfile
-from math import ceil
-from typing import List, Tuple
-from pathlib import Path
+__version__ = "0.1.0"
 
-# Third-party library imports
-from PIL import Image, UnidentifiedImageError
+import argparse
+import itertools
+import logging
+import os
+import sys
+import tempfile
+import threading
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
+from math import ceil
+from multiprocessing import freeze_support
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+from PIL import Image
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm
 from docx.table import Table
-from docx.text.paragraph import Paragraph  # Extended typing
+from docx.text.paragraph import Paragraph
 
-# Default values
-DEFAULT_TEMPLATE = "jpg2Document.docx"            # Default Word template name
-DEFAULT_OUTPUT = "pictures.docx"                  # Default output (generated) document name
-DEFAULT_PLACEHOLDER = "<<jpg2Document>>"          # Placeholder text to be replaced in the template
-DEFAULT_IMAGE_WIDTH_CM = 9.2                      # Width in centimeters for each inserted image
-DEFAULT_GAP_WIDTH_CM = 0.05                       # Gap in centimeters between image columns
-DEFAULT_MAX_IMAGE_WIDTH_PX = 1200                 # Maximum width in pixels before scaling images down
-DEFAULT_JPEG_QUALITY = 80                         # JPEG compression quality (0-100)
-DEFAULT_DOC_AUTHOR = "jpg2Document"               # Document property: author
-DEFAULT_DOC_COMMENTS = "jpg2Document by ot2i7ba"  # Document property: comments
-DEFAULT_INPUT_DIR = Path.cwd()                    # Default current directory
-DEFAULT_EXTENSIONS = ".jpg,.jpeg,.png"            # Allowed image file extensions
+# ---------------------------------------------------------------------------
+# Constants / Defaults
+# ---------------------------------------------------------------------------
 
-def clear_console() -> None:
-    """Clear the console screen using subprocess.call."""
-    command = 'cls' if sys.platform.startswith('win') else 'clear'
-    subprocess.call(command, shell=True)
+DEFAULT_TEMPLATE        = "jpg2Document.docx"
+DEFAULT_OUTPUT          = "pictures.docx"
+DEFAULT_PLACEHOLDER     = "<<jpg2Document>>"
+DEFAULT_IMAGE_WIDTH_CM  = 9.2
+DEFAULT_GAP_WIDTH_CM    = 0.05
+DEFAULT_MAX_IMAGE_WIDTH = 1200
+DEFAULT_JPEG_QUALITY    = 80
+DEFAULT_DOC_AUTHOR      = "jpg2Document"
+DEFAULT_DOC_COMMENTS    = "jpg2Document by ot2i7ba"
+DEFAULT_EXTENSIONS      = ".jpg,.jpeg,.png"
+DEFAULT_RESAMPLE        = "lanczos"
 
-def print_blank_line() -> None:
-    """Print a blank line."""
-    print()
+RESAMPLE_FILTERS = {
+    "lanczos":  Image.LANCZOS,
+    "bicubic":  Image.BICUBIC,
+    "bilinear": Image.BILINEAR,
+    "nearest":  Image.NEAREST,
+}
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Config:
+    template:       Path
+    output:         Path
+    placeholder:    str
+    input_dir:      Path
+    extensions:     Tuple[str, ...]
+    image_width_cm: float
+    gap_width_cm:   float
+    max_width_px:   int
+    jpeg_quality:   int
+    author:         str
+    comments:       str
+    resample:       str
+    workers:        int
+    force:          bool
+    clear:          bool
+    verbose:        bool
+
+    def validate(self) -> None:
+        errors: List[str] = []
+
+        if not self.template.exists():
+            errors.append(f"Template not found: '{self.template}'")
+        elif self.template.suffix.lower() != ".docx":
+            errors.append(f"Template must be a .docx file: '{self.template}'")
+
+        if not self.input_dir.exists() or not self.input_dir.is_dir():
+            errors.append(f"Input directory not found: '{self.input_dir}'")
+
+        if self.output.suffix.lower() != ".docx":
+            errors.append(f"Output must be a .docx file: '{self.output}'")
+        elif self.output.exists() and not self.force:
+            errors.append(
+                f"Output already exists: '{self.output}' — use --force to overwrite."
+            )
+
+        out_parent = self.output.parent
+        if out_parent != Path(".") and not out_parent.exists():
+            errors.append(f"Output directory does not exist: '{out_parent}'")
+
+        if not 1 <= self.jpeg_quality <= 95:
+            errors.append(f"--jpeg_quality must be 1–95, got {self.jpeg_quality}")
+        if self.image_width_cm <= 0:
+            errors.append(f"--image_width must be > 0, got {self.image_width_cm}")
+        if self.gap_width_cm < 0:
+            errors.append(f"--gap_width must be >= 0, got {self.gap_width_cm}")
+        if self.max_width_px <= 0:
+            errors.append(f"--max_px must be > 0, got {self.max_width_px}")
+        if not self.extensions:
+            errors.append("At least one file extension must be provided")
+        for ext in self.extensions:
+            if not ext.startswith("."):
+                errors.append(f"Extension must start with '.': '{ext}'")
+        if self.resample not in RESAMPLE_FILTERS:
+            errors.append(
+                f"Unknown resample filter '{self.resample}'. "
+                f"Choose from: {', '.join(RESAMPLE_FILTERS)}"
+            )
+        if self.workers < 1:
+            errors.append(f"--workers must be >= 1, got {self.workers}")
+
+        if errors:
+            raise ValueError("Configuration errors:\n  " + "\n  ".join(errors))
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+def setup_logging(verbose: bool) -> None:
+    logging.basicConfig(
+        format="%(asctime)s %(levelname)s: %(message)s",
+        level=logging.DEBUG if verbose else logging.INFO,
+        datefmt="%H:%M:%S",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Spinner
+# ---------------------------------------------------------------------------
 
 class Spinner:
-    """
-    Object-oriented spinner for displaying a progress indicator.
-    Usable with start() and stop(), and as a context manager.
-    """
-    def __init__(self, task_name: str) -> None:
-        self.task_name = task_name
-        self._stop_event = threading.Event()
-        self._lock = threading.Lock()
-        self._spinner_cycle = itertools.cycle(['-', '/', '-', '\\'])
+    """Thread-based console spinner; call with silent=True to suppress."""
+
+    _FRAMES = ["-", "/", "|", "\\"]
+
+    def __init__(self, label: str, silent: bool = False) -> None:
+        self.label = label
+        self.silent = silent
+        self._stop = threading.Event()
         self._thread = threading.Thread(target=self._spin, daemon=True)
 
     def _spin(self) -> None:
-        while not self._stop_event.is_set():
-            with self._lock:
-                sys.stdout.write(f'\rProcessing {self.task_name} ... {next(self._spinner_cycle)}')
-                sys.stdout.flush()
-            time.sleep(0.1)
-        with self._lock:
-            sys.stdout.write('\r')
+        blank = " " * (len(self.label) + 20)
+        for frame in itertools.cycle(self._FRAMES):
+            if self._stop.is_set():
+                break
+            sys.stdout.write(f"\rProcessing {self.label} ... {frame}")
             sys.stdout.flush()
+            time.sleep(0.1)
+        sys.stdout.write(f"\r{blank}\r")
+        sys.stdout.flush()
 
-    def start(self) -> None:
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop_event.set()
-        self._thread.join()
-
-    def __enter__(self) -> "Spinner":
-        self.start()
+    def start(self) -> "Spinner":
+        if not self.silent:
+            self._thread.start()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def stop(self) -> None:
+        if self._thread.is_alive():
+            self._stop.set()
+            self._thread.join()
+
+    def __enter__(self) -> "Spinner":
+        return self.start()
+
+    def __exit__(self, *_) -> None:
         self.stop()
 
-def remove_table_borders(table: Table) -> None:
-    """Remove all visible borders from the given docx 'table'."""
-    tbl = table._tbl
-    if tbl.tblPr is None:
-        tblPr = OxmlElement('w:tblPr')
-        tbl.append(tblPr)
-    else:
-        tblPr = tbl.tblPr
 
-    tblBorders = OxmlElement('w:tblBorders')
-    for edge in ('top', 'left', 'bottom', 'right', 'insideH', 'insideV'):
-        edge_el = OxmlElement(f'w:{edge}')
-        edge_el.set(qn('w:val'), 'none')
-        tblBorders.append(edge_el)
-    tblPr.append(tblBorders)
+# ---------------------------------------------------------------------------
+# Image processing
+# ---------------------------------------------------------------------------
 
-def compress_and_scale_image(
-    input_path: str,
-    output_path: str,
-    max_width_px: int,
-    quality: int
-) -> bool:
-    """
-    Attempt to open 'input_path' as an image, resize it to 'max_width_px'
-    if it is wider, and save it as a JPEG to 'output_path' with the specified quality.
+def get_image_files(input_dir: Path, extensions: Tuple[str, ...]) -> List[Path]:
+    return sorted(
+        (p for p in input_dir.iterdir()
+         if p.is_file() and p.suffix.lower() in extensions),
+        key=lambda p: p.name.lower(),
+    )
 
-    Returns:
-        True if the image was successfully opened and saved, False otherwise.
-    """
+
+def _compress_one(
+    args: Tuple[Path, Path, int, int, str]
+) -> Tuple[Optional[Path], str]:
+    """Compress and scale a single image. Module-level for multiprocessing pickling."""
+    src, dst, max_px, quality, resample_key = args
+    filter_ = RESAMPLE_FILTERS.get(resample_key, Image.LANCZOS)
     try:
-        with Image.open(input_path) as img:
-            # Only accept landscape images (width > height).
+        with Image.open(src) as img:
+            img.load()
             if img.width <= img.height:
-                return False
+                return None, f"skipped (portrait/square): {src.name}"
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            if img.width > max_px:
+                scale = max_px / img.width
+                img = img.resize(
+                    (max_px, max(1, int(img.height * scale))), filter_
+                )
+            img.save(dst, "JPEG", optimize=True, quality=quality)
+        return dst, f"compressed: {src.name}"
+    except Exception as exc:
+        return None, f"error ({src.name}): {exc}"
 
-            if img.width > max_width_px:
-                ratio = max_width_px / float(img.width)
-                new_height = int(img.height * ratio)
-                img = img.resize((max_width_px, new_height), Image.LANCZOS)
-
-            img.save(output_path, 'JPEG', optimize=True, quality=quality)
-        return True
-
-    except (OSError, UnidentifiedImageError) as err:
-        print(f"\nSkipping '{input_path}': could not open or process the image ({err}).")
-        return False
-
-def insert_table_after_paragraph(
-    document: Document,
-    paragraph: Paragraph,
-    rows: int,
-    cols: int
-) -> Table:
-    """
-    Create a new table with (rows x cols) cells, then insert it immediately
-    after the given paragraph in the docx document.
-
-    Returns:
-        A docx.table.Table object representing the newly inserted table.
-    """
-    tmp_table = document.add_table(rows=rows, cols=cols)
-    tbl_element = tmp_table._tbl
-    tmp_table._element.getparent().remove(tmp_table._element)
-    paragraph._p.addnext(tbl_element)
-
-    return Table(tbl_element, paragraph._parent)
-
-def create_table_with_images(
-    document: Document,
-    paragraph: Paragraph,
-    image_paths: List[str],
-    image_width_cm: float,
-    gap_width_cm: float
-) -> None:
-    """
-    Build a 3-column table of images (left image, narrow gap, right image),
-    inserting the table immediately after the given paragraph. Each pair of images
-    is followed by an empty row.
-    """
-    total_images = len(image_paths)
-    pairs = ceil(total_images / 2)
-    rows_needed = pairs * 2
-    cols = 3
-
-    table = insert_table_after_paragraph(document, paragraph, rows_needed, cols)
-    table.alignment = WD_TABLE_ALIGNMENT.LEFT
-    table.autofit = False
-    remove_table_borders(table)
-
-    for row in table.rows:
-        row.cells[0].width = Cm(image_width_cm)
-        row.cells[1].width = Cm(gap_width_cm)
-        row.cells[2].width = Cm(image_width_cm)
-
-    idx_image = 0
-    for pair_idx in range(pairs):
-        row_images = table.rows[pair_idx * 2]
-        # The following row remains empty as a separator.
-        _ = table.rows[pair_idx * 2 + 1]
-
-        if idx_image < total_images:
-            cell_left = row_images.cells[0]
-            p_left = cell_left.paragraphs[0]
-            p_left.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            p_left.add_run().add_picture(image_paths[idx_image], width=Cm(image_width_cm))
-            idx_image += 1
-
-        if idx_image < total_images:
-            cell_right = row_images.cells[2]
-            p_right = cell_right.paragraphs[0]
-            p_right.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-            p_right.add_run().add_picture(image_paths[idx_image], width=Cm(image_width_cm))
-            idx_image += 1
-
-def get_image_files(input_dir: Path, valid_ext: Tuple[str, ...]) -> List[Path]:
-    """
-    Return a sorted list of image file Paths from the specified directory that match the given extensions.
-    """
-    # Search the directory (only files in the current directory)
-    files = [p for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() in valid_ext]
-    return sorted(files, key=lambda p: p.name.lower())
 
 def process_images(
     input_dir: Path,
-    compressed_dir: Path,
-    valid_ext: Tuple[str, ...],
+    out_dir: Path,
+    extensions: Tuple[str, ...],
     max_width_px: int,
-    jpeg_quality: int
-) -> List[str]:
+    jpeg_quality: int,
+    resample: str,
+    workers: int,
+) -> Tuple[List[Path], int, int]:
     """
-    Process all images in the given input directory that have valid extensions.
-    Compress and scale images into the compressed directory.
-    
-    Returns:
-        A list of file paths (as strings) of the successfully processed images.
+    Compress all landscape images from input_dir into out_dir.
+    Returns (sorted_compressed_paths, n_inserted, n_skipped).
     """
-    image_files = get_image_files(input_dir, valid_ext)
-    compressed_paths: List[str] = []
-    for i, img_path in enumerate(image_files):
-        out_path = compressed_dir / f"compressed_{i}.jpg"
-        if compress_and_scale_image(str(img_path), str(out_path), max_width_px, jpeg_quality):
-            compressed_paths.append(str(out_path))
-    return compressed_paths
+    sources = get_image_files(input_dir, extensions)
+    if not sources:
+        return [], 0, 0
 
-def parse_arguments() -> argparse.Namespace:
-    """
-    Parse optional command-line arguments. If none are provided, default values are used.
-    """
-    parser = argparse.ArgumentParser(
-        description="Insert compressed landscape images into a Word template at a specified placeholder.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
+    tasks = [
+        (src, out_dir / f"{i:05d}_{src.stem}.jpg", max_width_px, jpeg_quality, resample)
+        for i, src in enumerate(sources)
+    ]
 
-    parser.add_argument("--template", type=str, default=None,
-                        help="Path to the Word template (.docx).")
-    parser.add_argument("--output", type=str, default=None,
-                        help="Path for the output Word file.")
-    parser.add_argument("--placeholder", type=str, default=None,
-                        help="Placeholder text in the template to be replaced.")
-    parser.add_argument("--input_dir", type=str, default=str(DEFAULT_INPUT_DIR),
-                        help="Directory to search for image files.")
-    parser.add_argument("--extensions", type=str, default=DEFAULT_EXTENSIONS,
-                        help="Comma-separated list of valid image file extensions.")
-    parser.add_argument("--image_width", type=float, default=None,
-                        help="Width in cm for each inserted image.")
-    parser.add_argument("--gap_width", type=float, default=None,
-                        help="Width in cm for the gap between images.")
-    parser.add_argument("--max_px", type=int, default=None,
-                        help="Maximum width in pixels before image is scaled down.")
-    parser.add_argument("--jpeg_quality", type=int, default=None,
-                        help="JPEG compression quality (0-100).")
-    parser.add_argument("--doc_author", type=str, default=None,
-                        help="Value for the document's author property.")
-    parser.add_argument("--doc_comments", type=str, default=None,
-                        help="Value for the document's comments property.")
+    success: set = set()
+    skipped = 0
 
-    return parser.parse_args()
+    if workers > 1 and len(tasks) > 1:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            for fut in as_completed(pool.submit(_compress_one, t) for t in tasks):
+                path, status = fut.result()
+                logging.debug(status)
+                if path is not None:
+                    success.add(path)
+                else:
+                    skipped += 1
+    else:
+        for task in tasks:
+            path, status = _compress_one(task)
+            logging.debug(status)
+            if path is not None:
+                success.add(path)
+            else:
+                skipped += 1
 
-def validate_parameters(args: argparse.Namespace) -> Tuple[Tuple[str, ...], float, float, int, int]:
-    """
-    Validate and normalize input parameters.
-    
-    Returns:
-        A tuple containing:
-          - valid_extensions: Tuple[str, ...]
-          - image_width_cm: float
-          - gap_width_cm: float
-          - max_image_width_px: int
-          - jpeg_quality: int
-    """
-    # Validate JPEG quality
-    quality = args.jpeg_quality if args.jpeg_quality is not None else DEFAULT_JPEG_QUALITY
-    if not (0 <= quality <= 100):
-        print("jpeg_quality must be between 0 and 100.")
-        sys.exit(1)
-    
-    # Validate width values
-    img_width = args.image_width if args.image_width is not None else DEFAULT_IMAGE_WIDTH_CM
-    gap_width = args.gap_width if args.gap_width is not None else DEFAULT_GAP_WIDTH_CM
-    if img_width <= 0 or gap_width < 0:
-        print("image_width must be > 0 and gap_width must be >= 0.")
-        sys.exit(1)
-    
-    # Validate max_px
-    max_px = args.max_px if args.max_px is not None else DEFAULT_MAX_IMAGE_WIDTH_PX
-    if max_px <= 0:
-        print("max_px must be a positive integer.")
-        sys.exit(1)
-    
-    # Validate the input directory
-    input_path = Path(args.input_dir)
-    if not input_path.is_dir():
-        print(f"Input directory '{input_path}' does not exist or is not a directory.")
-        sys.exit(1)
-    
-    # Process file extensions (e.g., ".jpg,.jpeg,.png")
-    ext_list = [ext.strip().lower() for ext in args.extensions.split(',') if ext.strip()]
-    if not ext_list:
-        print("At least one valid file extension must be provided.")
-        sys.exit(1)
-    
-    return (tuple(ext_list), img_width, gap_width, max_px, quality)
+    logging.debug("Compression done: %d ok, %d skipped", len(success), skipped)
+    # Preserve original alphabetical sort order
+    ordered = [t[1] for t in tasks if t[1] in success]
+    return ordered, len(ordered), skipped
 
-class jpg2Document:
-    """
-    Encapsulates the entire process:
-      - Reading and validating parameters,
-      - Opening the template,
-      - Processing and compressing images,
-      - Inserting images into the template,
-      - Setting document properties and saving.
-    """
-    def __init__(self, args: argparse.Namespace) -> None:
-        self.args = args
-        self.valid_ext, self.image_width_cm, self.gap_width_cm, self.max_image_width_px, self.jpeg_quality = validate_parameters(args)
-        self.docx_template = args.template or DEFAULT_TEMPLATE
-        self.docx_output = args.output or DEFAULT_OUTPUT
-        self.placeholder_text = args.placeholder or DEFAULT_PLACEHOLDER
-        self.doc_author = args.doc_author or DEFAULT_DOC_AUTHOR
-        self.doc_comments = args.doc_comments or DEFAULT_DOC_COMMENTS
-        self.input_dir = Path(args.input_dir)
+
+# ---------------------------------------------------------------------------
+# Document building
+# ---------------------------------------------------------------------------
+
+def _remove_table_borders(table: Table) -> None:
+    tblPr = table._tbl.tblPr
+    if tblPr is None:
+        tblPr = OxmlElement("w:tblPr")
+        table._tbl.append(tblPr)
+    existing = tblPr.find(qn("w:tblBorders"))
+    if existing is not None:
+        tblPr.remove(existing)
+    borders = OxmlElement("w:tblBorders")
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        el = OxmlElement(f"w:{edge}")
+        el.set(qn("w:val"), "none")
+        borders.append(el)
+    tblPr.append(borders)
+
+
+def _insert_table_after(
+    document: Document, paragraph: Paragraph, rows: int, cols: int
+) -> Table:
+    tmp = document.add_table(rows=rows, cols=cols)
+    tbl_el = tmp._tbl
+    tmp._element.getparent().remove(tmp._element)
+    paragraph._p.addnext(tbl_el)
+    return Table(tbl_el, document)
+
+
+def build_image_table(
+    document: Document,
+    paragraph: Paragraph,
+    image_paths: List[Path],
+    image_width_cm: float,
+    gap_width_cm: float,
+) -> None:
+    total = len(image_paths)
+    pairs = ceil(total / 2)
+    table = _insert_table_after(document, paragraph, pairs * 2, 3)
+    table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    table.autofit = False
+    _remove_table_borders(table)
+
+    col_widths = [image_width_cm, gap_width_cm, image_width_cm]
+    for row in table.rows:
+        for cell, w in zip(row.cells, col_widths):
+            cell.width = Cm(w)
+
+    idx = 0
+    for i in range(pairs):
+        cells = table.rows[i * 2].cells
+        for col in (0, 2):
+            if idx < total:
+                cells[col].paragraphs[0].add_run().add_picture(
+                    str(image_paths[idx]), width=Cm(image_width_cm)
+                )
+                idx += 1
+
+
+# ---------------------------------------------------------------------------
+# Application
+# ---------------------------------------------------------------------------
+
+class JPG2DocumentApp:
+    def __init__(self, cfg: Config) -> None:
+        self.cfg = cfg
 
     def run(self) -> None:
-        # Check if the template exists
-        template_path = Path(self.docx_template)
-        if not template_path.exists():
-            print(f"Template '{template_path}' was not found. Aborting.")
-            sys.exit(1)
+        cfg = self.cfg
 
+        candidates = get_image_files(cfg.input_dir, cfg.extensions)
+        if not candidates:
+            raise RuntimeError(
+                f"No image files found in '{cfg.input_dir}' "
+                f"(extensions: {', '.join(cfg.extensions)})"
+            )
+        logging.info(
+            "%d candidate image(s) found in '%s'", len(candidates), cfg.input_dir
+        )
+
+        logging.info("Loading template '%s'", cfg.template)
+        doc = self._load_template()
+        placeholder_para = self._find_placeholder(doc)
+        logging.info("Placeholder '%s' found", cfg.placeholder)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with Spinner("images", silent=cfg.verbose):
+                images, inserted, skipped = process_images(
+                    cfg.input_dir,
+                    Path(tmpdir),
+                    cfg.extensions,
+                    cfg.max_width_px,
+                    cfg.jpeg_quality,
+                    cfg.resample,
+                    cfg.workers,
+                )
+
+            if not images:
+                raise RuntimeError(
+                    f"No landscape images to insert — {skipped} file(s) skipped "
+                    "(portrait, square, or unreadable)"
+                )
+
+            logging.info("Inserting %d image(s), %d skipped", inserted, skipped)
+            self._insert_images(doc, placeholder_para, images)
+
+            if cfg.clear:
+                os.system("cls" if os.name == "nt" else "clear")
+
+            logging.info("Saving '%s'", cfg.output)
+            self._save_document(doc)
+
+        print()
+        logging.info(
+            "Done. %d image(s) inserted, %d skipped → '%s'",
+            inserted, skipped, cfg.output,
+        )
+
+    def _load_template(self) -> Document:
         try:
-            document = Document(str(template_path))
-        except Exception as err:
-            print(f"Failed to open template '{template_path}': {err}")
-            sys.exit(1)
+            return Document(str(self.cfg.template))
+        except Exception as exc:
+            raise RuntimeError(
+                f"Cannot open template '{self.cfg.template}': {exc}"
+            ) from exc
 
-        # Check if the placeholder is present.
-        if not any(self.placeholder_text in paragraph.text for paragraph in document.paragraphs):
-            print(f"Placeholder '{self.placeholder_text}' was not found. Aborting.")
-            sys.exit(1)
+    def _find_placeholder(self, doc: Document) -> Paragraph:
+        all_paras: List[Paragraph] = list(doc.paragraphs)
+        for sec in doc.sections:
+            all_paras.extend(sec.header.paragraphs)
+            all_paras.extend(sec.footer.paragraphs)
+        for para in all_paras:
+            if self.cfg.placeholder in para.text:
+                return para
+        raise ValueError(
+            f"Placeholder '{self.cfg.placeholder}' not found in template. "
+            "Ensure it is plain, unsplit text in the document body."
+        )
 
-        # Retrieve image files from the input directory
-        image_files = get_image_files(self.input_dir, self.valid_ext)
-        if not image_files:
-            print("No image files found in the input directory. Aborting.")
-            sys.exit(1)
+    def _insert_images(
+        self, doc: Document, para: Paragraph, images: List[Path]
+    ) -> None:
+        # Prefer run-level replacement to preserve character formatting.
+        # Fall back to para.text if the placeholder spans multiple runs.
+        for run in para.runs:
+            if self.cfg.placeholder in run.text:
+                run.text = run.text.replace(self.cfg.placeholder, "")
+                break
+        else:
+            para.text = para.text.replace(self.cfg.placeholder, "")
+        build_image_table(
+            doc, para, images, self.cfg.image_width_cm, self.cfg.gap_width_cm
+        )
 
-        # Use a temporary directory to store the compressed images.
-        with tempfile.TemporaryDirectory() as temp_dir:
-            compressed_dir = Path(temp_dir)
-            with Spinner("images") as spinner:
-                compressed_paths = process_images(self.input_dir, compressed_dir, self.valid_ext, self.max_image_width_px, self.jpeg_quality)
-            print()  # Line break after the spinner
-
-            if not compressed_paths:
-                print("No valid landscape images could be processed. Aborting.")
-                sys.exit(1)
-
-            # Replace the placeholder in the document with the table of images.
-            for paragraph in document.paragraphs:
-                if self.placeholder_text in paragraph.text:
-                    paragraph.text = paragraph.text.replace(self.placeholder_text, "")
-                    create_table_with_images(document, paragraph, compressed_paths, self.image_width_cm, self.gap_width_cm)
-                    break
-
-        print_blank_line()
-        print(f"Placeholder '{self.placeholder_text}' found and replaced.")
-
-        # Set document properties.
-        document.core_properties.author = self.doc_author
-        document.core_properties.comments = self.doc_comments
-
+    def _save_document(self, doc: Document) -> None:
+        doc.core_properties.author = self.cfg.author
+        doc.core_properties.comments = self.cfg.comments
         try:
-            document.save(self.docx_output)
-        except Exception as err:
-            print(f"Failed to save document '{self.docx_output}': {err}")
-            sys.exit(1)
-        print(f"Document saved as: {self.docx_output}")
-        print_blank_line()
-        print("Time saved once again. Thanks, ot2i7ba!")
-        print("Check the result and adjust it if necessary!")
+            doc.save(str(self.cfg.output))
+        except OSError as exc:
+            raise RuntimeError(f"Cannot save '{self.cfg.output}': {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def parse_args() -> Config:
+    cpu_count = os.cpu_count() or 1
+    parser = argparse.ArgumentParser(
+        description="Insert compressed landscape images into a Word template.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+
+    g_io = parser.add_argument_group("input / output")
+    g_io.add_argument("--template",   type=Path, default=Path(DEFAULT_TEMPLATE))
+    g_io.add_argument("--output",     type=Path, default=Path(DEFAULT_OUTPUT))
+    g_io.add_argument("--input_dir",  type=Path, default=Path.cwd())
+    g_io.add_argument("--extensions", type=str,  default=DEFAULT_EXTENSIONS,
+                      help="Comma-separated image extensions, e.g. .jpg,.png")
+    g_io.add_argument("--placeholder",type=str,  default=DEFAULT_PLACEHOLDER)
+    g_io.add_argument("--force", action="store_true",
+                      help="Overwrite output file if it already exists")
+
+    g_img = parser.add_argument_group("image options")
+    g_img.add_argument("--image_width",  type=float, default=DEFAULT_IMAGE_WIDTH_CM,
+                       help="Width (cm) per image in the table")
+    g_img.add_argument("--gap_width",    type=float, default=DEFAULT_GAP_WIDTH_CM,
+                       help="Gap (cm) between image columns")
+    g_img.add_argument("--max_px",       type=int,   default=DEFAULT_MAX_IMAGE_WIDTH,
+                       help="Maximum image width in pixels before downscaling")
+    g_img.add_argument("--jpeg_quality", type=int,   default=DEFAULT_JPEG_QUALITY,
+                       help="JPEG compression quality (1–95)")
+    g_img.add_argument("--resample", choices=list(RESAMPLE_FILTERS),
+                       default=DEFAULT_RESAMPLE,
+                       help="Resampling filter for downscaling")
+
+    g_doc = parser.add_argument_group("document metadata")
+    g_doc.add_argument("--doc_author",   type=str, default=DEFAULT_DOC_AUTHOR)
+    g_doc.add_argument("--doc_comments", type=str, default=DEFAULT_DOC_COMMENTS)
+
+    g_run = parser.add_argument_group("runtime")
+    g_run.add_argument("--workers", type=int, default=cpu_count,
+                       help="Parallel worker processes for image compression")
+    g_run.add_argument("--clear",   action="store_true",
+                       help="Clear console before saving output")
+    g_run.add_argument("--verbose", action="store_true",
+                       help="Enable debug logging (also suppresses spinner)")
+
+    args = parser.parse_args()
+    exts = tuple(
+        e.strip().lower() for e in args.extensions.split(",") if e.strip()
+    )
+
+    return Config(
+        template       = args.template.resolve(),
+        output         = args.output,
+        placeholder    = args.placeholder,
+        input_dir      = args.input_dir.resolve(),
+        extensions     = exts,
+        image_width_cm = args.image_width,
+        gap_width_cm   = args.gap_width,
+        max_width_px   = args.max_px,
+        jpeg_quality   = args.jpeg_quality,
+        author         = args.doc_author,
+        comments       = args.doc_comments,
+        resample       = args.resample,
+        workers        = args.workers,
+        force          = args.force,
+        clear          = args.clear,
+        verbose        = args.verbose,
+    )
+
 
 def main() -> None:
-    args = parse_arguments()
-    app = jpg2Document(args)
-    app.run()
+    cfg = parse_args()
+    setup_logging(cfg.verbose)
+    try:
+        cfg.validate()
+    except ValueError as exc:
+        logging.error("%s", exc)
+        sys.exit(2)
+    try:
+        JPG2DocumentApp(cfg).run()
+    except (RuntimeError, ValueError) as exc:
+        logging.error("%s", exc)
+        sys.exit(1)
+    except Exception as exc:
+        logging.exception("Unexpected error: %s", exc)
+        sys.exit(1)
+
 
 if __name__ == "__main__":
-    clear_console()
-    try:
-        main()
-    except KeyboardInterrupt:
-        print_blank_line()
-        print("\nProcess interrupted by user. Exiting gracefully...")
-        sys.exit(0)
+    freeze_support()
+    main()

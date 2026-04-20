@@ -1,136 +1,168 @@
 # jpg2Document
-**jpg2Document** is a Python script designed to generate a Microsoft Word document from a template by inserting a table of compressed, landscape-oriented images in place of a specified placeholder. This tool streamlines the process of compiling images into a well-structured document, making it especially useful for creating reports, presentations, or documentation that require visual content.
+**jpg2Document** is a Python script that generates a Microsoft Word document from a template by inserting a table of compressed, landscape-oriented images in place of a specified placeholder. It is especially useful for creating reports, presentations, or documentation that require structured visual content.
 
 > [!NOTE]
-> This script is specifically tailored for inserting JPEG and PNG images into Word documents using predefined placeholders. Compatibility with other image formats or different document templates has not been extensively tested.
+> Only landscape-oriented images (width > height) are processed. Portrait and square images are skipped automatically.
 
 > [!WARNING]
-> This script is currently in its initial development stage. While it has been tested for basic functionality, it may not handle all edge cases or complex templates. Use it with caution, especially in environments where document integrity is critical.
+> This script is in active development. While it has been tested for core functionality, complex Word templates (e.g., heavily formatted placeholders or nested tables) may require additional testing.
 
 ## Table of Contents
 - [Features](#features)
 - [Requirements](#requirements)
 - [Installation](#installation)
-  - [Usage](#usage)
-  - [Examples](#examples)
-  - [Releases](#releases)
+- [Usage](#usage)
+- [Command-Line Arguments](#command-line-arguments)
+- [Examples](#examples)
+- [Releases](#releases)
 - [Changes](#changes)
 - [License](#license)
-- [Contributing](#contributing)
-- [Disclaimer](#disclaimer)
-- [Conclusion](#conclusion)
 
 ## Features
-- **Template-Based Document Generation:** Automatically inserts images into a Word document based on a specified placeholder.
-- **Image Compression and Scaling:** Compresses images to reduce file size and scales them to a consistent width, ensuring a uniform appearance.
-- **Landscape-Oriented Image Handling:** Processes only landscape-oriented images (width > height) to maintain document layout aesthetics.
-- **Customizable Parameters:** Allows customization of image width, gap between images, maximum image width in pixels, and JPEG compression quality via command-line arguments.
-- **Automated Placeholder Replacement:** Searches for a predefined placeholder in the template and replaces it with a table of images. If the placeholder is not found, the script aborts without making changes.
-- **Temporary File Management:** Stores compressed images in a temporary folder and cleans up after the document is generated.
-- **User Feedback with Spinner:** Displays a spinner animation to indicate progress during image processing.
-- **Document Property Settings:** Sets author and comments properties in the generated Word document for better documentation and tracking.
+- **Template-Based Document Generation:** Replaces a plain-text placeholder in a `.docx` template with a two-column image table.
+- **Image Compression and Scaling:** Downscales images to a configurable maximum pixel width and compresses them as JPEG before insertion.
+- **Landscape Filtering:** Only processes images where width > height. Portrait, square, and unreadable files are skipped and counted in the summary.
+- **Parallel Processing:** Compresses images concurrently using multiple CPU cores (`--workers`), configurable or auto-detected.
+- **Configurable Resampling:** Choose the downscaling filter (`lanczos`, `bicubic`, `bilinear`, `nearest`) via `--resample`.
+- **Overwrite Protection:** The output file is never silently overwritten — use `--force` to permit it.
+- **Robust Error Handling:** All configuration errors are collected and reported together before processing begins. Unexpected image errors are caught per-file without aborting the run.
+- **Progress Spinner:** Displays a console spinner during processing; automatically suppressed when `--verbose` is active.
+- **Document Metadata:** Sets author and comments properties on the generated document.
 
 ## Requirements
 - **Python:** 3.7 or higher
 - **Python Packages:**
-  - [Pillow](https://python-pillow.org/) (`PIL`) ≥ 9.0.0,<10.0.0
-  - [python-docx](https://python-docx.readthedocs.io/en/latest/) ≥ 0.8.11,<0.9.0
+  - [Pillow](https://python-pillow.org/) `==9.3.0`
+  - [python-docx](https://python-docx.readthedocs.io/en/latest/) `==0.8.11`
 
 ## Installation
 
-1. **Clone the Repository**
+1. **Clone the repository**
    ```sh
    git clone https://github.com/ot2i7ba/jpg2Document.git
    cd jpg2Document
    ```
 
-2. **Install Required Dependencies**
+2. **Install dependencies**
    ```sh
-    pip install -r requirements.txt
-   ```
-
-   If a requirements.txt file is not provided, you can install the dependencies individually:
-   ```sh
-    pip pip install Pillow python-docx
+   pip install -r requirements.txt
    ```
 
 ## Usage
-1. Prepare Your Template
-   - Create a Word document (.docx) that includes the placeholder text <<jpg2Document>> where you want the table of images to be inserted.
-   - Save this template as jpg2Document.docx in the same directory as the script or specify a different template using command-line arguments.
 
-2. Place Your Images
-   - Ensure that the images you want to include are placed in the same directory as the script. Only landscape-oriented images (.jpg, .jpeg, .png) will be processed.
+1. **Prepare your template**
+   Create a `.docx` file containing the placeholder text `<<jpg2Document>>` at the position where the image table should be inserted. The placeholder must be plain, unstyled text within a single paragraph.
 
-3. Run the Script
+2. **Place your images**
+   Put the landscape images (`.jpg`, `.jpeg`, `.png`) you want to include in the working directory or specify a path with `--input_dir`.
+
+3. **Run the script**
    ```sh
    python jpg2Document.py
    ```
 
-   Optional: Use command-line arguments to customize parameters.
-   ```sh
-   python jpg2Document.py --template my_template.docx --output my_document.docx --placeholder "<<InsertImages>>" --image_width 8.0 --gap_width 0.1 --max_px 1000 --jpeg_quality 75 --doc_author "Your Name" --doc_comments "Generated by jpg2Document"
-   ```
+## Command-Line Arguments
 
-### Command-Line Arguments
-- --template: Path to the Word template (.docx). Defaults to jpg2Document.docx.
-- --output: Path for the output Word file. Defaults to pictures.docx.
-- --placeholder: Placeholder text in the template to be replaced. Defaults to <<jpg2Document>>.
-- --image_width: Width in centimeters for each inserted image. Defaults to 9.2.
-- --gap_width: Width in centimeters for the gap between images. Defaults to 0.05.
-- --max_px: Maximum width in pixels before an image is scaled down. Defaults to 1200.
-- --jpeg_quality: JPEG compression quality (0-100). Defaults to 80.
-- --doc_author: Value for the document's author property. Defaults to jpg2Document.
-- --doc_comments: Value for the document's comments property. Defaults to jpg2Document by ot2i7ba.
+### input / output
+| Argument | Default | Description |
+|---|---|---|
+| `--template` | `jpg2Document.docx` | Path to the Word template |
+| `--output` | `pictures.docx` | Path for the output file |
+| `--input_dir` | current directory | Directory containing source images |
+| `--extensions` | `.jpg,.jpeg,.png` | Comma-separated list of file extensions to process |
+| `--placeholder` | `<<jpg2Document>>` | Placeholder text to replace in the template |
+| `--force` | off | Overwrite output file if it already exists |
 
-# Examples
+### image options
+| Argument | Default | Description |
+|---|---|---|
+| `--image_width` | `9.2` | Width (cm) per image in the table |
+| `--gap_width` | `0.05` | Gap (cm) between the two image columns |
+| `--max_px` | `1200` | Maximum image width in pixels before downscaling |
+| `--jpeg_quality` | `80` | JPEG compression quality (1–95) |
+| `--resample` | `lanczos` | Downscaling filter: `lanczos`, `bicubic`, `bilinear`, `nearest` |
 
-## Default Usage
-   ```sh
-   python jpg2Document.py
-   ```
+### document metadata
+| Argument | Default | Description |
+|---|---|---|
+| `--doc_author` | `jpg2Document` | Author property of the output document |
+| `--doc_comments` | `jpg2Document by ot2i7ba` | Comments property of the output document |
 
-**Output**:
-- A Word document named pictures.docx is generated, containing a table of compressed, landscape-oriented images replacing the <<jpg2Document>> placeholder in the template.
-- Compressed images are stored temporarily in the compressed folder, which is deleted after the document is created.
+### runtime
+| Argument | Default | Description |
+|---|---|---|
+| `--workers` | CPU count | Parallel worker processes for image compression |
+| `--clear` | off | Clear the console before saving output |
+| `--verbose` | off | Enable debug logging (also suppresses spinner) |
 
-## Customized Parameters
-   ```sh
-   python jpg2Document.py --template report_template.docx --output annual_report.docx --placeholder "<<AnnualImages>>" --image_width 8.0 --gap_width 0.1 --max_px 1000 --jpeg_quality 75 --doc_author "Jane Doe" --doc_comments "Annual Report Images"
-   ```
+## Examples
 
-**Output**:
-- A Word document named annual_report.docx is generated based on report_template.docx, with images inserted at the <<AnnualImages>> placeholder.
-- Images are compressed to a maximum width of 1000 pixels with a JPEG quality of 75.
+### Default run
+```sh
+python jpg2Document.py
+```
+Reads `jpg2Document.docx` as template, processes all landscape `.jpg`/`.jpeg`/`.png` images in the current directory, and writes `pictures.docx`.
 
-# Releases
-A compiled and packaged version of jpg2Document is available for download in the **[Releases](https://github.com/ot2i7ba/jpg2Document/releases)** section on GitHub. This version includes all necessary dependencies and can be run without requiring Python to be installed on your system.
+### Custom template and output
+```sh
+python jpg2Document.py \
+  --template report_template.docx \
+  --output annual_report.docx \
+  --placeholder "<<AnnualImages>>" \
+  --input_dir ./photos \
+  --image_width 8.0 \
+  --gap_width 0.1 \
+  --max_px 1000 \
+  --jpeg_quality 75 \
+  --doc_author "Jane Doe" \
+  --force
+```
+
+### Fast run with all cores, bilinear resampling
+```sh
+python jpg2Document.py --resample bilinear --verbose
+```
+
+## Releases
+A compiled version (no Python required) is available in the **[Releases](https://github.com/ot2i7ba/jpg2Document/releases)** section on GitHub.
 
 ___
 
-# Changes
-## v0.0.2
+## Changes
 
-- **Project Renaming:** Changed the project and script name from jpg2Document to jpg2Document for consistency in English.
-- **Object-Oriented Main Process:** Refactored the main process into the Jpg2Dokument class to improve modularity, error handling, and reusability.
-- **Spinner as Context Manager:** Converted the spinner function into a class that supports context management, ensuring that the progress indicator thread is always cleaned up properly—even in case of errors.
-- **Pathlib for Path Handling:** Replaced traditional os.path operations with pathlib to make the code more modern, readable, and cross-platform.
-- **Enhanced Parameter Validation:** Added stricter validation for parameters (such as JPEG quality, image dimensions, and file extensions) to ensure only valid inputs are processed.
-- **Automatic Temporary Directory Cleanup:** Implemented the use of tempfile.TemporaryDirectory() for storing compressed images, which automatically cleans up temporary files after processing.
+## v0.1.0
+- **Critical fix:** Implemented the missing `process_images()` function — the script was not runnable in v0.0.5.
+- **Parallel image compression:** Added `ProcessPoolExecutor` support via `--workers` (defaults to CPU count).
+- **Config validation:** All parameters are validated before processing begins; all errors are reported together.
+- **Overwrite protection:** Output file is never silently overwritten; `--force` flag required.
+- **Resample filter:** Added `--resample` option (`lanczos`, `bicubic`, `bilinear`, `nearest`).
+- **Spinner integrated:** Progress spinner is now active during compression; suppressed in `--verbose` mode.
+- **`--clear` is now opt-in:** Previously the console was cleared by default; now requires explicit `--clear`.
+- **Run-level placeholder replacement:** Preserves paragraph character formatting when replacing the placeholder; falls back gracefully if the placeholder spans multiple runs.
+- **Robust border handling:** `_remove_table_borders` now replaces any existing `tblBorders` element instead of appending a duplicate.
+- **Broad exception handling in workers:** Image processing errors (including `MemoryError`, `DecompressionBombError`) are caught per-file and reported as skipped, never abort the run.
+- **`freeze_support()` placement:** Moved to `if __name__ == "__main__"` guard for correct frozen-executable support.
+- **Dead code removed:** `DEFAULT_INPUT_DIR`, unused `UnidentifiedImageError` import.
+
+## v0.0.2
+- Refactored main process into `Jpg2Dokument` class.
+- Spinner converted to context manager.
+- Replaced `os.path` with `pathlib`.
+- Added `tempfile.TemporaryDirectory()` for automatic cleanup.
 
 ## v0.0.1
 - Initial release.
 
 ___
 
-# License
-This project is licensed under the **[MIT license](https://github.com/ot2i7ba/jpg2Document/blob/main/LICENSE)**, providing users with flexibility and freedom to use and modify the software according to their needs.
+## License
+This project is licensed under the **[MIT License](https://github.com/ot2i7ba/jpg2Document/blob/main/LICENSE)**.
 
-# Contributing
-Contributions are welcome! Please fork the repository and submit a pull request for review.
+## Contributing
+Contributions are welcome. Please fork the repository and submit a pull request for review.
 
-# Disclaimer
-This project is provided without warranties. Users are advised to review the accompanying license for more information on the terms of use and limitations of liability.
+## Disclaimer
+This project is provided without warranties. See the license for terms of use and limitations of liability.
 
 # Conclusion
 This script has been tailored to fit my specific professional needs, and while it may seem like a small tool, it has a significant impact on my workflow. jpg2Document is a valuable tool for automating the creation of Word documents that incorporate multiple images in a structured and visually appealing manner. By handling image compression, scaling, and placement, it simplifies the process of compiling images into reports or presentations. Greetings to my dear colleagues who avoid scripts like the plague and think that consoles and Bash are some sort of dark magic – the [compiled](https://github.com/ot2i7ba/jpg2Document/releases) version will spare you the console kung-fu and hopefully be a helpful tool for you as well. 😉
